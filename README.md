@@ -38,7 +38,7 @@ Official Kodi repository for **[Prism](https://github.com/Goldenfreddy0703/Prism
 
 If you prefer to install the repository addon directly:
 
-- [repository.prism-1.0.zip](https://github.com/Goldenfreddy0703/repository.prism/raw/refs/heads/main/repo/zips/repository.prism/repository.prism-1.0.zip)
+- [repository.prism-1.0.zip](https://goldenfreddy0703.github.io/repository.prism/repository.prism-1.0.zip)
 
 After installing the zip, continue from step 5 above to install Context Prism and Prism from the repository.
 

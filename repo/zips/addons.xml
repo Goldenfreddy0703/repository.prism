@@ -101,7 +101,7 @@
 			Rework for Prism 2.0
 		</news>
 	</extension>
-</addon><addon id="plugin.video.prism" version="5.0.28" name="Prism" provider-name="Nixgates">
+</addon><addon id="plugin.video.prism" version="5.0.29" name="Prism" provider-name="Nixgates">
     <requires>
         <import addon="xbmc.addon" version="17.9.910" />
         <import addon="xbmc.python" version="3.0.0" />

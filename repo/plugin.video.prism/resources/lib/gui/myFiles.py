@@ -70,6 +70,16 @@ class Menus:
     def my_files_play(self, args):
         self.providers[args['debrid_provider']][1]().play_item(args)
 
+    def my_files_local_action(self, args):
+        from resources.lib.gui.my_files_local_ops import dispatch_local_action
+
+        try:
+            dispatch_local_action(args)
+        finally:
+            # RunPlugin invocations (handle -1) must end the directory cleanly or Back
+            # can jump to the addon home instead of the previous folder.
+            g.cancel_directory()
+
 
 class BaseDebridWalker:
     provider = ''
@@ -226,6 +236,67 @@ class AllDebridWalker(BaseDebridWalker):
 
         return AllDebrid()
 
+    @staticmethod
+    def _is_video_name(name):
+        return (name or "").lower().endswith(tuple(g.common_video_extensions))
+
+    @staticmethod
+    def _tree_nodes_at_path(tree, tree_path):
+        nodes = tree or []
+        for part in tree_path or []:
+            match = next((entry for entry in nodes if entry.get("n") == part and entry.get("e")), None)
+            if not match:
+                return []
+            nodes = match.get("e") or []
+        return nodes
+
+    @staticmethod
+    def _resolve_tree_path(tree, tree_path):
+        """
+        AllDebrid magnet/files trees usually wrap all entries in one root folder.
+        Skip that wrapper when opening a torrent so users don't click the same name twice.
+        """
+        tree_path = list(tree_path or [])
+        if tree_path:
+            return tree_path
+        nodes = AllDebridWalker._tree_nodes_at_path(tree, tree_path)
+        if len(nodes) == 1 and nodes[0].get("e") and not nodes[0].get("l"):
+            tree_path.append(nodes[0].get("n") or "")
+        return tree_path
+
+    def _count_video_files(self, nodes):
+        count = 0
+        for entry in nodes or []:
+            if entry.get("e"):
+                count += self._count_video_files(entry["e"])
+            elif entry.get("l") and self._is_video_name(entry.get("n")):
+                count += 1
+        return count
+
+    def _format_tree_listing(self, magnet_id, tree_path):
+        tree = self.all_debrid.get_magnet_files_tree(magnet_id)
+        tree_path = AllDebridWalker._resolve_tree_path(tree, tree_path)
+        nodes = AllDebridWalker._tree_nodes_at_path(tree, tree_path)
+        items = []
+
+        for entry in nodes:
+            name = entry.get("n") or ""
+            if entry.get("e"):
+                items.append(
+                    {
+                        "id": magnet_id,
+                        "name": name,
+                        "folder": True,
+                        "tree_path": (tree_path or []) + [name],
+                    }
+                )
+                continue
+            if not entry.get("l") or not self._is_video_name(name):
+                continue
+            items.append({"name": name, "link": entry.get("l"), "size": entry.get("s", 0)})
+
+        return sorted(items, key=lambda x: x["name"].lower())
+
     def get_init_list(self):
         root = self.all_debrid.magnet_status(None).get("magnets", [])
         items = []
@@ -233,50 +304,33 @@ class AllDebridWalker(BaseDebridWalker):
         for i in root:
             if not (isinstance(i, dict) and i.get('status') == "Ready"):
                 continue
+            tree = self.all_debrid.get_magnet_files_tree(i['id'])
+            video_count = self._count_video_files(tree)
+            if video_count == 0:
+                continue
             item = {
                 "id": i['id'],
                 "name": i['filename'],
-                "links": sorted(
-                    [
-                        link
-                        for link in i['links']
-                        if (
-                            len(filenames := self._get_lowest_level_filename_for_link_files(link.get("files", []))) == 1
-                            and filenames[0].endswith(g.common_video_extensions)
-                        )
-                    ],
-                    key=lambda x: x['filename'],
-                ),
             }
-            if item.get("links"):
-                items.append(item)
+            if video_count > 1:
+                item["folder"] = True
+                item["tree_path"] = []
+            else:
+                for entry in self._format_tree_listing(i['id'], []):
+                    if entry.get("link"):
+                        item.update(entry)
+                        break
+            items.append(item)
 
         self._format_items(items)
 
     def _is_folder(self, list_item):
-        return bool(list_item.get("links"))
+        return bool(list_item.get("links")) or list_item.get("folder", False)
 
     def get_folder(self, list_item):
-        links = self.all_debrid.magnet_status(list_item['id']).get("magnets", []).get("links", [])
-        items = []
-
-        for l in links:
-            filenames = self._get_lowest_level_filename_for_link_files(l.get("files", []))
-            if not (len(filenames) == 1 and filenames[0].endswith(tuple(g.common_video_extensions))):
-                continue
-            item = {"name": filenames[0], "link": l.get("link"), "size": l.get("size", 0)}
-            items.append(item)
-
-        self._format_items(sorted(items, key=lambda x: x['name']))
-
-    def _get_lowest_level_filename_for_link_files(self, files_item):
-        files = []
-        for file in files_item if isinstance(files_item, list) else [files_item]:
-            if entities := file.get("e"):
-                files.extend(self._get_lowest_level_filename_for_link_files(entities))
-            else:
-                files.append(file.get("n"))
-        return files
+        magnet_id = list_item['id']
+        tree_path = list_item.get('tree_path', [])
+        self._format_items(self._format_tree_listing(magnet_id, tree_path))
 
     def resolve_link(self, list_item):
         return self.all_debrid.resolve_hoster(list_item['link'])
@@ -471,9 +525,40 @@ class OffCloudWalker(BaseDebridWalker):
 class BaseLocalPathWalker(BaseDebridWalker):
     setting_id = ''
     missing_path_string_id = 30446
+    _current_browse_path = ''
 
     def _root_folder(self):
         return (g.get_setting(self.setting_id) or '').strip()
+
+    def _format_items(self, items):
+        from resources.lib.gui.my_files_local_ops import build_context_menu
+
+        is_downloads = self.provider == 'local_downloads'
+        browse_path = self._current_browse_path
+        for i in items:
+            i.update({'debrid_provider': self.provider})
+            if self._is_folder(i):
+                name = i['name']
+                is_playable = False
+                is_folder = True
+                action = 'myFilesFolder'
+            else:
+                name = f"{i['name']}  ({tools.bytes_size_display(i['size'])})" if i.get("size") else i['name']
+                is_folder = False
+                is_playable = True
+                action = 'myFilesPlay'
+
+            cm = build_context_menu(i, browse_path, is_downloads=is_downloads)
+
+            g.add_directory_item(
+                name,
+                action=action,
+                is_playable=is_playable,
+                is_folder=is_folder,
+                action_args=tools.construct_action_args(i),
+                menu_item=g.create_icon_dict(self.provider, g.ICONS_PATH),
+                cm=cm,
+            )
 
     def _get_folder_list(self, path):
         try:
@@ -504,13 +589,16 @@ class BaseLocalPathWalker(BaseDebridWalker):
         if not root or not xbmcvfs.exists(root):
             g.notification(g.ADDON_NAME, g.get_language_string(self.missing_path_string_id))
             return
+        self._current_browse_path = root
         self._format_items(self._get_folder_list(root))
 
     def _is_folder(self, list_item):
         return list_item['path'].endswith(('\\', '/'))
 
     def get_folder(self, list_item):
-        self._format_items(self._get_folder_list(list_item['path']))
+        folder_path = list_item['path']
+        self._current_browse_path = folder_path
+        self._format_items(self._get_folder_list(folder_path))
 
     def resolve_link(self, list_item):
         return list_item['path']

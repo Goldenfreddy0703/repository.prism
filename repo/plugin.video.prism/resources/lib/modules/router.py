@@ -309,6 +309,7 @@ def dispatch(params):
                         background.close()
                     finally:
                         del background
+                    helpers.clear_persistent_background()
                 del prism_player
 
         except NoPlayableSourcesException:
@@ -317,6 +318,7 @@ def dispatch(params):
                 del background
             except (UnboundLocalError, AttributeError):
                 pass
+            helpers.clear_persistent_background()
 
             g.cancel_playback()
 
@@ -723,6 +725,11 @@ def dispatch(params):
         from resources.lib.gui import myFiles
 
         myFiles.Menus().my_files_play(action_args)
+
+    elif action == "myFilesLocalAction":
+        from resources.lib.gui import myFiles
+
+        myFiles.Menus().my_files_local_action(action_args)
 
     elif action == "forceSimklSync":
         from resources.lib.database.session import get_sync_database
